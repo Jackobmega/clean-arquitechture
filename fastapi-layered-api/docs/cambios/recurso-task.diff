@@ -1,0 +1,902 @@
+diff -ruN -x __pycache__ -x .pytest_cache -x app.db -x .env -x docs orig/fastapi-layered-api/README.md fastapi-layered-api/README.md
+--- orig/fastapi-layered-api/README.md	1969-12-31 19:00:00.000000000 -0500
++++ fastapi-layered-api/README.md	2026-09-21 18:19:16.979900692 -0500
+@@ -0,0 +1,298 @@
++# Users API — API REST en capas con FastAPI
++
++API REST de ejemplo, **documentada paso a paso**, que implementa una
++**arquitectura en capas** (layered architecture) con [FastAPI](https://fastapi.tiangolo.com/),
++siguiendo la documentación oficial de FastAPI, el estándar OAuth2/JWT
++(RFC 6749 / RFC 7519) y el **OWASP API Security Top 10 (2023)**.
++
++Caso de uso: gestión de usuarios con registro, login y autenticación JWT.
++
++> Este proyecto es el material de acompañamiento de la presentación
++
++> `FastAPI - API REST en capas.pptx`. Actualizado a version 3.14
++
++
++---
++
++## 1. Por qué una arquitectura en capas
++
++Separar responsabilidades en capas con una única dirección de dependencia
++(API → Servicios → Repositorios → Modelos) es una práctica estándar de
++la industria (equivalente a *Clean/Hexagonal Architecture* aplicada a un
++proyecto FastAPI). Objetivos:
++
++- **Testabilidad**: los servicios se pueden probar sin levantar HTTP;
++  los repositorios se pueden sustituir por dobles de prueba.
++- **Mantenibilidad**: cambiar de SQLite a PostgreSQL, o de JWT a sesiones,
++  afecta solo a una capa.
++- **Separación de responsabilidades (SRP)**: cada capa tiene un único
++  motivo de cambio.
++
++```
++Cliente HTTP
++     │
++     ▼
++┌─────────────────────┐  Recibe/valida HTTP, traduce excepciones
++│   API (routers)      │  de dominio a códigos de estado HTTP.
++└─────────┬────────────┘
++          ▼
++┌─────────────────────┐  Reglas de negocio: unicidad de email,
++│   Services            │  autenticación, emisión de JWT.
++└─────────┬────────────┘
++          ▼
++┌─────────────────────┐  Traduce operaciones de negocio a
++│   Repositories         │  consultas SQLAlchemy (patrón Repository).
++└─────────┬────────────┘
++          ▼
++┌─────────────────────┐  Modelos ORM + engine/sesión async.
++│   Models / DB          │
++└─────────────────────┘
++```
++
++Capa transversal **Core**: configuración (`pydantic-settings`), seguridad
++(hash de contraseñas + JWT) y excepciones de dominio, usadas por varias capas.
++
++---
++
++## 2. Estructura del proyecto
++
++```
++fastapi-layered-api/
++├── app/
++│   ├── main.py                     # Application factory, middlewares, lifespan
++│   ├── core/
++│   │   ├── config.py               # Settings (pydantic-settings) + .env
++│   │   ├── security.py             # Hash Argon2 (pwdlib) + JWT (pyjwt)
++│   │   └── exceptions.py           # Excepciones de dominio (sin HTTP)
++│   ├── db/
++│   │   ├── base.py                 # Declarative Base de SQLAlchemy
++│   │   └── session.py              # engine async + get_db() con commit-on-success
++│   ├── models/
++│   │   ├── user.py                 # Modelo ORM (tabla `users`)
++│   │   └── task.py                 # Modelo ORM (tabla `tasks`) + TaskPriority
++│   ├── schemas/
++│   │   ├── user.py                 # UserCreate / UserUpdate / UserPublic
++│   │   ├── task.py                 # TaskCreate / TaskUpdate / TaskPublic
++│   │   ├── auth.py                 # Token, LoginRequest
++│   │   └── common.py               # ErrorResponse
++│   ├── repositories/
++│   │   ├── user_repository.py      # CRUD puro contra la base de datos
++│   │   └── task_repository.py      # CRUD de tareas filtrado por usuario
++│   ├── services/
++│   │   ├── user_service.py         # Reglas de negocio + orquestación
++│   │   └── task_service.py         # Regla de pertenencia de tareas
++│   └── api/
++│       ├── deps.py                 # Dependencias compartidas (DB, auth)
++│       └── v1/
++│           ├── api.py              # Agregador de routers v1
++│           └── routers/
++│               ├── auth.py         # POST /auth/register, /auth/login
++│               ├── users.py        # /users/me, /users, /users/{id}
++│               └── tasks.py        # /tasks, /tasks/{id}
++├── tests/                          # pytest + httpx.AsyncClient
++│   ├── conftest.py
++│   ├── test_auth.py
++│   ├── test_users.py
++│   └── test_tasks.py
++├── docs/
++│   └── cambios/                    # Registro de cambios (resumen + diff)
++├── requirements.txt
++├── .env.example
++├── .gitignore
++├── Dockerfile
++└── pytest.ini
++```
++
++---
++
++## 3. Guía paso a paso: cómo se construyó (y cómo ejecutarlo)
++
++### Paso 1 — Entorno virtual y dependencias
++
++```bash
++python --version 				# Actualizado a la version 3.14
++python3 -m venv .venv
++source .venv/bin/activate        # En Windows: .venv\Scripts\activate
++pip install -r requirements.txt
++```
++
++Librerías clave y por qué se eligieron:
++
++| Librería | Uso | Referencia |
++|---|---|---|
++| `fastapi` | Framework web ASGI | https://fastapi.tiangolo.com |
++| `uvicorn[standard]` | Servidor ASGI de producción | Recomendado en docs oficiales de FastAPI |
++| `pydantic` / `pydantic-settings` | Validación de datos y configuración tipada | https://fastapi.tiangolo.com/advanced/settings/ |
++| `sqlalchemy` (async) + `aiosqlite` | ORM y acceso a datos no bloqueante | https://fastapi.tiangolo.com/tutorial/sql-databases/ |
++| `pwdlib[argon2]` | Hash de contraseñas (Argon2) | Recomendación oficial actual de FastAPI para OAuth2+JWT |
++| `pyjwt` | Firma/verificación de JWT (RFC 7519) | Recomendación oficial actual de FastAPI |
++| `pytest`, `httpx`, `pytest-asyncio` | Testing automatizado | https://fastapi.tiangolo.com/tutorial/testing/ |
++
++### Paso 2 — Configuración (`app/core/config.py`)
++
++Se define una clase `Settings(BaseSettings)` que lee variables de entorno
++y un archivo `.env`, con `lru_cache` para no releerlo en cada request.
++Esto sigue el factor **"Config"** de la metodología
++[12-Factor App](https://12factor.net/config): la configuración vive en
++el entorno, nunca hardcodeada.
++
++```bash
++cp .env.example .env
++# Generar una clave fuerte para SECRET_KEY:
++openssl rand -hex 32
++```
++
++Edita `.env` y reemplaza `SECRET_KEY` con el valor generado.
++
++### Paso 3 — Modelo de datos (`app/models/user.py`)
++
++Se define la entidad `User` como modelo SQLAlchemy 2.0 (`Mapped[...]`,
++tipado moderno). **Nunca** se expone este modelo directamente en las
++respuestas HTTP.
++
++### Paso 4 — Schemas Pydantic (`app/schemas/user.py`)
++
++Se separan los contratos por propósito: `UserCreate` (entrada, incluye
++password), `UserUpdate` (entrada parcial), `UserPublic` (salida, sin
++password). Esta separación evita fugas accidentales de datos sensibles
++y es el patrón documentado oficialmente por FastAPI.
++
++### Paso 5 — Repositorio (`app/repositories/user_repository.py`)
++
++Encapsula todas las consultas SQL (`select`, `get`, `count`, etc.). No
++conoce reglas de negocio ni HTTP.
++
++### Paso 6 — Seguridad (`app/core/security.py`)
++
++- Hash de contraseñas con **Argon2** vía `pwdlib` (ganador de la Password
++  Hashing Competition; resistente a ataques por GPU/ASIC).
++- Emisión y verificación de **JWT** vía `pyjwt`, con `exp` (expiración) e
++  `iat` obligatorios, y el algoritmo fijado explícitamente (`algorithms=[...]`)
++  para evitar el ataque de "alg confusion".
++- Verificación contra un hash señuelo cuando el usuario no existe, para
++  no filtrar por tiempo de respuesta si un email está registrado.
++
++### Paso 7 — Servicio (`app/services/user_service.py`)
++
++Contiene las reglas de negocio: registrar (valida email único), autenticar
++(valida credenciales + estado activo), emitir tokens, actualizar y borrar.
++Lanza excepciones de dominio (`app/core/exceptions.py`), nunca `HTTPException`.
++
++### Paso 8 — Dependencias de API (`app/api/deps.py`)
++
++Se define `OAuth2PasswordBearer` (para que `/docs` muestre el botón
++"Authorize") y las dependencias encadenadas `get_user_repository` →
++`get_user_service` → `get_current_user` → `get_current_active_user`.
++
++### Paso 9 — Routers (`app/api/v1/routers/`)
++
++Cada router recibe la petición, la valida con un schema, invoca al
++servicio y traduce las excepciones de dominio a códigos HTTP (`401`,
++`403`, `404`, `409`). Aplica autorización a nivel de objeto: un usuario
++solo puede leer/editar su propio recurso (mitigación de OWASP
++**API1:2023 Broken Object Level Authorization**).
++
++### Paso 10 — Aplicación principal (`app/main.py`)
++
++Ensambla todo: crea la app, agrega middlewares (CORS, GZip), registra un
++manejador global de excepciones de dominio, incluye los routers bajo el
++prefijo `/api/v1` (versionado por URL) y expone `/health`.
++
++### Paso 11 — Levantar el servidor
++
++```bash
++uvicorn app.main:app --reload
++```
++
++Documentación interactiva autogenerada por FastAPI (OpenAPI 3.1):
++
++- Swagger UI: http://127.0.0.1:8000/docs
++- ReDoc: http://127.0.0.1:8000/redoc
++
++### Paso 12 — Probar el flujo completo
++
++```bash
++# 1) Registro
++curl -X POST http://127.0.0.1:8000/api/v1/auth/register \
++  -H "Content-Type: application/json" \
++  -d '{"email":"ada@example.com","full_name":"Ada Lovelace","password":"ClaveSegura123"}'
++
++# 2) Login (form-urlencoded, estándar OAuth2 Password Flow)
++curl -X POST http://127.0.0.1:8000/api/v1/auth/login \
++  -d "username=ada@example.com&password=ClaveSegura123"
++# => {"access_token": "...", "token_type": "bearer"}
++
++# 3) Usar el token
++curl http://127.0.0.1:8000/api/v1/users/me \
++  -H "Authorization: Bearer <access_token>"
++```
++
++### Paso 13 — Tests automatizados
++
++```bash
++pytest -v
++```
++
++Los tests usan SQLite **en memoria** e inyectan la sesión de prueba con
++`app.dependency_overrides[get_db]` (mecanismo oficial de testing de
++FastAPI: https://fastapi.tiangolo.com/tutorial/testing/), sin depender
++de la base de datos real ni de un servidor HTTP levantado.
++
++---
++
++## 4. Buenas prácticas aplicadas (resumen)
++
++- **Arquitectura en capas** con dirección de dependencia única.
++- **`response_model` explícito** en cada endpoint (nunca se serializa el
++  modelo ORM directamente).
++- **Versionado de API** por prefijo de URL (`/api/v1`), facilita introducir
++  `/api/v2` sin romper clientes existentes.
++- **Paginación** en endpoints de colección (`page`, `page_size`, `total`).
++- **Inyección de dependencias** (`Depends`) para DB, servicios y usuario
++  autenticado — facilita el testing y evita acoplamiento.
++- **Manejo consistente de errores**: excepciones de dominio traducidas a
++  códigos HTTP correctos (`401/403/404/409`), formato de error uniforme.
++- **Seguridad (OWASP API Security Top 10 2023)**:
++  - API1 *Broken Object Level Authorization* → verificación de propiedad
++    del recurso en cada endpoint de `/users/{id}`.
++  - API2 *Broken Authentication* → JWT firmado, expiración corta,
++    hashing Argon2, mitigación de timing attacks.
++  - API8 *Security Misconfiguration* → manejador global que evita fugar
++    detalles internos ante errores no controlados.
++- **Transacciones**: patrón *Unit of Work por request* (`commit` al
++  final si todo sale bien, `rollback` ante cualquier excepción).
++- **Configuración externalizada** (12-Factor App): nada de secretos en
++  el código fuente.
++- **Contenedores**: `Dockerfile` con usuario no-root e imagen `slim`.
++- **Testing automatizado** con base de datos aislada por test.
++
++## 5. De este ejemplo a producción
++
++Este proyecto es un ejemplo educativo. Antes de usarlo en producción,
++considera:
++
++1. **Migraciones versionadas** con [Alembic](https://alembic.sqlalchemy.org/)
++   en lugar de `Base.metadata.create_all` en el `lifespan`.
++2. **PostgreSQL** (`postgresql+asyncpg://...`) en vez de SQLite.
++3. **Rate limiting** (p. ej. `slowapi`) para mitigar OWASP
++   **API4:2023 Unrestricted Resource Consumption**.
++4. **Logging estructurado** y correlación de requests (request id).
++5. **Refresh tokens** y una estrategia de revocación de tokens (deny-list
++   o tokens de corta duración + refresh).
++6. **CI/CD** ejecutando `pytest` y linters (`ruff`, `mypy`) en cada PR.
++7. **Gestión de secretos** con un vault (AWS Secrets Manager, Vault, etc.)
++   en vez de un archivo `.env` en el servidor.
++
++---
++
++## Fuentes y estándares consultados
++
++- FastAPI — Bigger Applications: https://fastapi.tiangolo.com/tutorial/bigger-applications/
++- FastAPI — OAuth2 with Password and JWT: https://fastapi.tiangolo.com/tutorial/security/oauth2-jwt/
++- FastAPI — SQL Databases: https://fastapi.tiangolo.com/tutorial/sql-databases/
++- FastAPI — Settings and Environment Variables: https://fastapi.tiangolo.com/advanced/settings/
++- FastAPI — Testing: https://fastapi.tiangolo.com/tutorial/testing/
++- OWASP API Security Top 10 (2023): https://owasp.org/API-Security/editions/2023/en/0x11-t10/
++- The Twelve-Factor App: https://12factor.net/
++- RFC 6749 (OAuth 2.0): https://www.rfc-editor.org/rfc/rfc6749
++- RFC 7519 (JSON Web Token): https://www.rfc-editor.org/rfc/rfc7519
+diff -ruN -x __pycache__ -x .pytest_cache -x app.db -x .env -x docs orig/fastapi-layered-api/app/api/deps.py fastapi-layered-api/app/api/deps.py
+--- orig/fastapi-layered-api/app/api/deps.py	2026-09-21 17:55:54.228021645 -0500
++++ fastapi-layered-api/app/api/deps.py	2026-09-21 18:19:05.250767186 -0500
+@@ -17,7 +17,9 @@
+ from app.core.exceptions import UserNotFoundError
+ from app.db.session import get_db
+ from app.models.user import User
++from app.repositories.task_repository import TaskRepository
+ from app.repositories.user_repository import UserRepository
++from app.services.task_service import TaskService
+ from app.services.user_service import UserService
+ 
+ # `tokenUrl` apunta al endpoint de login; esto es lo que hace que
+@@ -35,6 +37,16 @@
+     return UserService(repository)
+ 
+ 
++def get_task_repository(db: Annotated[AsyncSession, Depends(get_db)]) -> TaskRepository:
++    return TaskRepository(db)
++
++
++def get_task_service(
++    repository: Annotated[TaskRepository, Depends(get_task_repository)],
++) -> TaskService:
++    return TaskService(repository)
++
++
+ async def get_current_user(
+     token: Annotated[str, Depends(oauth2_scheme)],
+     service: Annotated[UserService, Depends(get_user_service)],
+diff -ruN -x __pycache__ -x .pytest_cache -x app.db -x .env -x docs orig/fastapi-layered-api/app/api/v1/api.py fastapi-layered-api/app/api/v1/api.py
+--- orig/fastapi-layered-api/app/api/v1/api.py	2026-09-21 17:55:54.228072270 -0500
++++ fastapi-layered-api/app/api/v1/api.py	2026-09-21 18:19:05.422787850 -0500
+@@ -9,8 +9,9 @@
+ 
+ from fastapi import APIRouter
+ 
+-from app.api.v1.routers import auth, users
++from app.api.v1.routers import auth, tasks, users
+ 
+ api_router = APIRouter()
+ api_router.include_router(auth.router)
+ api_router.include_router(users.router)
++api_router.include_router(tasks.router)
+diff -ruN -x __pycache__ -x .pytest_cache -x app.db -x .env -x docs orig/fastapi-layered-api/app/api/v1/routers/tasks.py fastapi-layered-api/app/api/v1/routers/tasks.py
+--- orig/fastapi-layered-api/app/api/v1/routers/tasks.py	1969-12-31 19:00:00.000000000 -0500
++++ fastapi-layered-api/app/api/v1/routers/tasks.py	2026-09-21 18:19:05.613246691 -0500
+@@ -0,0 +1,124 @@
++"""
++Router: Tareas (recurso protegido).
++
++Todos los endpoints operan sobre el usuario autenticado: el `user_id`
++nunca viaja en la URL ni en el cuerpo, se toma siempre del JWT.
++
++Si la tarea no existe o pertenece a otro usuario se responde 404 (y no
++403), para no revelar la existencia de recursos ajenos (OWASP API1:2023
++Broken Object Level Authorization).
++
++Este router solo maneja HTTP: valida la entrada con schemas, invoca al
++servicio y traduce las excepciones de dominio a `HTTPException`.
++"""
++
++from typing import Annotated, Optional
++
++from fastapi import APIRouter, Depends, HTTPException, Query, status
++
++from app.api.deps import get_current_active_user, get_task_service
++from app.core.exceptions import TaskNotFoundError
++from app.models.task import TaskPriority
++from app.models.user import User
++from app.schemas.common import ErrorResponse
++from app.schemas.task import TaskCreate, TaskListResponse, TaskPublic, TaskUpdate
++from app.services.task_service import TaskService
++
++router = APIRouter(prefix="/tasks", tags=["tasks"])
++
++
++@router.post(
++    "",
++    response_model=TaskPublic,
++    status_code=status.HTTP_201_CREATED,
++    summary="Crear una tarea",
++)
++async def create_task(
++    payload: TaskCreate,
++    service: Annotated[TaskService, Depends(get_task_service)],
++    current_user: Annotated[User, Depends(get_current_active_user)],
++) -> TaskPublic:
++    task = await service.create_task(current_user.id, payload)
++    return TaskPublic.model_validate(task)
++
++
++@router.get(
++    "",
++    response_model=TaskListResponse,
++    summary="Listar las tareas del usuario (paginado)",
++)
++async def list_tasks(
++    service: Annotated[TaskService, Depends(get_task_service)],
++    current_user: Annotated[User, Depends(get_current_active_user)],
++    page: Annotated[int, Query(ge=1, description="Número de página (1-indexado)")] = 1,
++    page_size: Annotated[int, Query(ge=1, le=100, description="Tamaño de página (máx. 100)")] = 20,
++    is_done: Annotated[Optional[bool], Query(description="Filtrar por estado")] = None,
++    priority: Annotated[Optional[TaskPriority], Query(description="Filtrar por prioridad")] = None,
++) -> TaskListResponse:
++    tasks, total = await service.list_tasks(
++        current_user.id,
++        page=page,
++        page_size=page_size,
++        is_done=is_done,
++        priority=priority,
++    )
++    return TaskListResponse(
++        items=[TaskPublic.model_validate(t) for t in tasks],
++        total=total,
++        page=page,
++        page_size=page_size,
++    )
++
++
++@router.get(
++    "/{task_id}",
++    response_model=TaskPublic,
++    responses={404: {"model": ErrorResponse}},
++    summary="Obtener una tarea por id",
++)
++async def get_task(
++    task_id: int,
++    service: Annotated[TaskService, Depends(get_task_service)],
++    current_user: Annotated[User, Depends(get_current_active_user)],
++) -> TaskPublic:
++    try:
++        task = await service.get_task(task_id, current_user.id)
++    except TaskNotFoundError as exc:
++        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
++    return TaskPublic.model_validate(task)
++
++
++@router.put(
++    "/{task_id}",
++    response_model=TaskPublic,
++    responses={404: {"model": ErrorResponse}},
++    summary="Actualizar (parcialmente) una tarea",
++)
++async def update_task(
++    task_id: int,
++    payload: TaskUpdate,
++    service: Annotated[TaskService, Depends(get_task_service)],
++    current_user: Annotated[User, Depends(get_current_active_user)],
++) -> TaskPublic:
++    try:
++        task = await service.update_task(task_id, current_user.id, payload)
++    except TaskNotFoundError as exc:
++        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
++    return TaskPublic.model_validate(task)
++
++
++@router.delete(
++    "/{task_id}",
++    status_code=status.HTTP_204_NO_CONTENT,
++    responses={404: {"model": ErrorResponse}},
++    summary="Eliminar una tarea",
++)
++async def delete_task(
++    task_id: int,
++    service: Annotated[TaskService, Depends(get_task_service)],
++    current_user: Annotated[User, Depends(get_current_active_user)],
++) -> None:
++    try:
++        await service.delete_task(task_id, current_user.id)
++    except TaskNotFoundError as exc:
++        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+diff -ruN -x __pycache__ -x .pytest_cache -x app.db -x .env -x docs orig/fastapi-layered-api/app/core/exceptions.py fastapi-layered-api/app/core/exceptions.py
+--- orig/fastapi-layered-api/app/core/exceptions.py	2026-09-21 17:55:54.228212180 -0500
++++ fastapi-layered-api/app/core/exceptions.py	2026-09-21 18:19:05.679474947 -0500
+@@ -29,3 +29,7 @@
+ 
+ class InactiveUserError(DomainError):
+     """El usuario existe pero está deshabilitado."""
++
++
++class TaskNotFoundError(DomainError):
++    """La tarea solicitada no existe o no pertenece al usuario autenticado."""
+diff -ruN -x __pycache__ -x .pytest_cache -x app.db -x .env -x docs orig/fastapi-layered-api/app/models/__init__.py fastapi-layered-api/app/models/__init__.py
+--- orig/fastapi-layered-api/app/models/__init__.py	2026-09-21 17:55:54.228296163 -0500
++++ fastapi-layered-api/app/models/__init__.py	2026-09-21 18:19:05.746680278 -0500
+@@ -1,3 +1,4 @@
+ from app.models.user import User  # noqa: F401 - registra el modelo en Base.metadata
++from app.models.task import Task  # noqa: F401 - registra el modelo en Base.metadata
+ 
+-__all__ = ["User"]
++__all__ = ["User", "Task"]
+diff -ruN -x __pycache__ -x .pytest_cache -x app.db -x .env -x docs orig/fastapi-layered-api/app/models/task.py fastapi-layered-api/app/models/task.py
+--- orig/fastapi-layered-api/app/models/task.py	1969-12-31 19:00:00.000000000 -0500
++++ fastapi-layered-api/app/models/task.py	2026-09-21 18:19:05.811949638 -0500
+@@ -0,0 +1,58 @@
++"""
++Modelo ORM de Tarea (capa de persistencia).
++
++Representa una tarea personal que pertenece a un único usuario
++(relación N:1 con `User`). Al eliminar el usuario, sus tareas se eliminan
++en cascada a nivel de base de datos (`ondelete="CASCADE"`).
++
++Igual que con `User`, este modelo NUNCA se expone directamente en las
++respuestas de la API: para eso existen los schemas de app/schemas/task.py.
++"""
++
++import enum
++from datetime import datetime
++from typing import Optional
++
++from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String, func
++from sqlalchemy.orm import Mapped, mapped_column
++
++from app.db.base import Base
++
++
++class TaskPriority(str, enum.Enum):
++    """Niveles de prioridad permitidos para una tarea."""
++
++    LOW = "low"
++    MEDIUM = "medium"
++    HIGH = "high"
++
++
++class Task(Base):
++    __tablename__ = "tasks"
++
++    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
++    user_id: Mapped[int] = mapped_column(
++        Integer,
++        ForeignKey("users.id", ondelete="CASCADE"),
++        nullable=False,
++        index=True,
++    )
++    title: Mapped[str] = mapped_column(String(200), nullable=False)
++    description: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
++    priority: Mapped[TaskPriority] = mapped_column(
++        Enum(TaskPriority), default=TaskPriority.MEDIUM, nullable=False
++    )
++    is_done: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
++    due_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
++    created_at: Mapped[datetime] = mapped_column(
++        DateTime(timezone=True), server_default=func.now(), nullable=False
++    )
++    updated_at: Mapped[datetime] = mapped_column(
++        DateTime(timezone=True),
++        server_default=func.now(),
++        onupdate=func.now(),
++        nullable=False,
++    )
++
++    def __repr__(self) -> str:  # pragma: no cover - solo utilidad de debug
++        return f"<Task id={self.id} user_id={self.user_id} title={self.title!r}>"
+diff -ruN -x __pycache__ -x .pytest_cache -x app.db -x .env -x docs orig/fastapi-layered-api/app/repositories/task_repository.py fastapi-layered-api/app/repositories/task_repository.py
+--- orig/fastapi-layered-api/app/repositories/task_repository.py	1969-12-31 19:00:00.000000000 -0500
++++ fastapi-layered-api/app/repositories/task_repository.py	2026-09-21 18:19:05.825461216 -0500
+@@ -0,0 +1,84 @@
++"""
++Repositorio de Tarea (patrón Repository).
++
++Responsabilidad única: traducir operaciones a consultas SQLAlchemy sobre
++la tabla `tasks`. No conoce reglas de negocio ni HTTP.
++
++Todas las lecturas de una tarea individual filtran SIEMPRE por `id` Y
++`user_id`, de modo que una tarea ajena se comporta exactamente igual que
++una inexistente (autorización a nivel de objeto, OWASP API1:2023).
++"""
++
++from typing import Optional, Sequence
++
++from sqlalchemy import func, select
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from app.models.task import Task, TaskPriority
++from app.schemas.task import TaskCreate, TaskUpdate
++
++
++class TaskRepository:
++    def __init__(self, session: AsyncSession) -> None:
++        self._session = session
++
++    async def create(self, *, user_id: int, data: TaskCreate) -> Task:
++        task = Task(
++            user_id=user_id,
++            title=data.title,
++            description=data.description,
++            priority=data.priority,
++            due_date=data.due_date,
++        )
++        self._session.add(task)
++        await self._session.flush()  # asigna el `id` sin cerrar la transacción
++        await self._session.refresh(task)
++        return task
++
++    async def get_by_id_for_user(self, task_id: int, user_id: int) -> Optional[Task]:
++        result = await self._session.execute(
++            select(Task).where(Task.id == task_id, Task.user_id == user_id)
++        )
++        return result.scalar_one_or_none()
++
++    async def list_for_user(
++        self,
++        user_id: int,
++        *,
++        offset: int = 0,
++        limit: int = 20,
++        is_done: Optional[bool] = None,
++        priority: Optional[TaskPriority] = None,
++    ) -> tuple[Sequence[Task], int]:
++        # Los mismos filtros se aplican a la consulta de items y al conteo total.
++        filters = [Task.user_id == user_id]
++        if is_done is not None:
++            filters.append(Task.is_done == is_done)
++        if priority is not None:
++            filters.append(Task.priority == priority)
++
++        items_result = await self._session.execute(
++            select(Task)
++            .where(*filters)
++            .order_by(Task.created_at.desc(), Task.id.desc())
++            .offset(offset)
++            .limit(limit)
++        )
++        total_result = await self._session.execute(
++            select(func.count()).select_from(Task).where(*filters)
++        )
++        total = total_result.scalar_one()
++        return items_result.scalars().all(), total
++
++    async def update(self, task: Task, data: TaskUpdate) -> Task:
++        # Solo se asignan los campos enviados con un valor distinto de None.
++        for field, value in data.model_dump().items():
++            if value is not None:
++                setattr(task, field, value)
++        await self._session.flush()
++        await self._session.refresh(task)
++        return task
++
++    async def delete(self, task: Task) -> None:
++        await self._session.delete(task)
++        await self._session.flush()
+diff -ruN -x __pycache__ -x .pytest_cache -x app.db -x .env -x docs orig/fastapi-layered-api/app/schemas/task.py fastapi-layered-api/app/schemas/task.py
+--- orig/fastapi-layered-api/app/schemas/task.py	1969-12-31 19:00:00.000000000 -0500
++++ fastapi-layered-api/app/schemas/task.py	2026-09-21 18:19:05.893480206 -0500
+@@ -0,0 +1,63 @@
++"""
++Schemas (contratos de la API) para el recurso Tarea.
++
++Mismo patrón que app/schemas/user.py (Create / Update / Public):
++
++- `TaskCreate`       -> lo que el cliente envía al crear una tarea.
++- `TaskUpdate`       -> campos opcionales para una actualización parcial.
++- `TaskPublic`       -> lo que la API devuelve.
++- `TaskListResponse` -> colección paginada de tareas.
++
++El `user_id` nunca se recibe del cliente: siempre se toma del usuario
++autenticado, para que nadie pueda crear tareas a nombre de otro.
++"""
++
++from datetime import datetime
++from typing import Optional
++
++from pydantic import BaseModel, ConfigDict, Field
++
++from app.models.task import TaskPriority
++
++
++class TaskCreate(BaseModel):
++    title: str = Field(..., min_length=1, max_length=200, description="Título de la tarea.")
++    description: Optional[str] = Field(
++        None, max_length=1000, description="Descripción opcional de la tarea."
++    )
++    priority: TaskPriority = Field(TaskPriority.MEDIUM, description="Prioridad de la tarea.")
++    due_date: Optional[datetime] = Field(None, description="Fecha límite opcional.")
++
++
++class TaskUpdate(BaseModel):
++    """Todos los campos son opcionales: soporta PUT parcial."""
++
++    title: Optional[str] = Field(None, min_length=1, max_length=200)
++    description: Optional[str] = Field(None, max_length=1000)
++    priority: Optional[TaskPriority] = None
++    is_done: Optional[bool] = None
++    due_date: Optional[datetime] = None
++
++
++class TaskPublic(BaseModel):
++    id: int
++    user_id: int
++    title: str
++    description: Optional[str]
++    priority: TaskPriority
++    is_done: bool
++    due_date: Optional[datetime]
++    created_at: datetime
++    updated_at: datetime
++
++    # Permite construir el schema directamente desde el objeto ORM.
++    model_config = ConfigDict(from_attributes=True)
++
++
++class TaskListResponse(BaseModel):
++    """Envoltorio con metadatos de paginación (buena práctica REST)."""
++
++    items: list[TaskPublic]
++    total: int
++    page: int
++    page_size: int
+diff -ruN -x __pycache__ -x .pytest_cache -x app.db -x .env -x docs orig/fastapi-layered-api/app/services/task_service.py fastapi-layered-api/app/services/task_service.py
+--- orig/fastapi-layered-api/app/services/task_service.py	1969-12-31 19:00:00.000000000 -0500
++++ fastapi-layered-api/app/services/task_service.py	2026-09-21 18:19:05.963364582 -0500
+@@ -0,0 +1,60 @@
++"""
++Servicio de Tarea (capa de lógica de negocio).
++
++La única regla de negocio del recurso es la de pertenencia (ownership):
++un usuario solo puede operar sobre sus propias tareas. Si la tarea no
++existe o pertenece a otro usuario se lanza la misma excepción de dominio
++(`TaskNotFoundError`), para no revelar la existencia de recursos ajenos.
++El servicio no conoce HTTP; el router traduce la excepción a un 404.
++"""
++
++from typing import Optional
++
++from app.core.exceptions import TaskNotFoundError
++from app.models.task import Task, TaskPriority
++from app.repositories.task_repository import TaskRepository
++from app.schemas.task import TaskCreate, TaskUpdate
++
++
++class TaskService:
++    def __init__(self, repository: TaskRepository) -> None:
++        self._repository = repository
++
++    async def create_task(self, user_id: int, data: TaskCreate) -> Task:
++        """Crea una tarea asociada al usuario indicado."""
++        return await self._repository.create(user_id=user_id, data=data)
++
++    async def list_tasks(
++        self,
++        user_id: int,
++        *,
++        page: int,
++        page_size: int,
++        is_done: Optional[bool] = None,
++        priority: Optional[TaskPriority] = None,
++    ) -> tuple[list[Task], int]:
++        """Lista paginada de las tareas del usuario, con filtros opcionales."""
++        offset = (page - 1) * page_size
++        tasks, total = await self._repository.list_for_user(
++            user_id,
++            offset=offset,
++            limit=page_size,
++            is_done=is_done,
++            priority=priority,
++        )
++        return list(tasks), total
++
++    async def get_task(self, task_id: int, user_id: int) -> Task:
++        """Obtiene una tarea del usuario o lanza `TaskNotFoundError`."""
++        task = await self._repository.get_by_id_for_user(task_id, user_id)
++        if task is None:
++            raise TaskNotFoundError(f"Tarea con id={task_id} no encontrada.")
++        return task
++
++    async def update_task(self, task_id: int, user_id: int, data: TaskUpdate) -> Task:
++        task = await self.get_task(task_id, user_id)
++        return await self._repository.update(task, data)
++
++    async def delete_task(self, task_id: int, user_id: int) -> None:
++        task = await self.get_task(task_id, user_id)
++        await self._repository.delete(task)
+diff -ruN -x __pycache__ -x .pytest_cache -x app.db -x .env -x docs orig/fastapi-layered-api/tests/test_tasks.py fastapi-layered-api/tests/test_tasks.py
+--- orig/fastapi-layered-api/tests/test_tasks.py	1969-12-31 19:00:00.000000000 -0500
++++ fastapi-layered-api/tests/test_tasks.py	2026-09-21 18:19:06.031526972 -0500
+@@ -0,0 +1,123 @@
++"""Tests de la capa API para el recurso protegido /tasks."""
++
++import pytest
++from httpx import AsyncClient
++
++pytestmark = pytest.mark.asyncio
++
++OTHER_USER = {
++    "email": "grace.hopper@example.com",
++    "full_name": "Grace Hopper",
++    "password": "OtraSuperSecreta123",
++}
++
++
++async def _register_and_login(client: AsyncClient, user_payload: dict) -> str:
++    await client.post("/api/v1/auth/register", json=user_payload)
++    login_response = await client.post(
++        "/api/v1/auth/login",
++        data={"username": user_payload["email"], "password": user_payload["password"]},
++    )
++    return login_response.json()["access_token"]
++
++
++def _auth(token: str) -> dict:
++    return {"Authorization": f"Bearer {token}"}
++
++
++async def test_create_task_requires_authentication(client: AsyncClient):
++    response = await client.post("/api/v1/tasks", json={"title": "Sin token"})
++    assert response.status_code == 401
++
++
++async def test_create_task_and_list(client: AsyncClient, user_payload: dict):
++    token = await _register_and_login(client, user_payload)
++
++    response = await client.post(
++        "/api/v1/tasks", json={"title": "Estudiar FastAPI"}, headers=_auth(token)
++    )
++
++    assert response.status_code == 201
++    task = response.json()
++    assert task["title"] == "Estudiar FastAPI"
++    assert task["priority"] == "medium"
++    assert task["is_done"] is False
++
++    list_response = await client.get("/api/v1/tasks", headers=_auth(token))
++    assert list_response.status_code == 200
++    body = list_response.json()
++    assert body["total"] == 1
++    assert [t["id"] for t in body["items"]] == [task["id"]]
++
++
++async def test_list_tasks_filters(client: AsyncClient, user_payload: dict):
++    token = await _register_and_login(client, user_payload)
++
++    high = (
++        await client.post(
++            "/api/v1/tasks", json={"title": "Urgente", "priority": "high"}, headers=_auth(token)
++        )
++    ).json()
++    low = (
++        await client.post(
++            "/api/v1/tasks", json={"title": "Algún día", "priority": "low"}, headers=_auth(token)
++        )
++    ).json()
++    await client.put(f"/api/v1/tasks/{low['id']}", json={"is_done": True}, headers=_auth(token))
++
++    by_priority = (await client.get("/api/v1/tasks?priority=high", headers=_auth(token))).json()
++    assert by_priority["total"] == 1
++    assert [t["id"] for t in by_priority["items"]] == [high["id"]]
++
++    by_done = (await client.get("/api/v1/tasks?is_done=true", headers=_auth(token))).json()
++    assert by_done["total"] == 1
++    assert [t["id"] for t in by_done["items"]] == [low["id"]]
++
++
++async def test_update_task_is_partial(client: AsyncClient, user_payload: dict):
++    token = await _register_and_login(client, user_payload)
++    task = (
++        await client.post("/api/v1/tasks", json={"title": "Leer libro"}, headers=_auth(token))
++    ).json()
++
++    response = await client.put(
++        f"/api/v1/tasks/{task['id']}", json={"is_done": True}, headers=_auth(token)
++    )
++
++    assert response.status_code == 200
++    assert response.json()["is_done"] is True
++    assert response.json()["title"] == "Leer libro"
++
++
++async def test_user_cannot_access_another_users_task(client: AsyncClient, user_payload: dict):
++    owner_token = await _register_and_login(client, user_payload)
++    task = (
++        await client.post("/api/v1/tasks", json={"title": "Privada"}, headers=_auth(owner_token))
++    ).json()
++
++    other_token = await _register_and_login(client, OTHER_USER)
++    url = f"/api/v1/tasks/{task['id']}"
++
++    assert (await client.get(url, headers=_auth(other_token))).status_code == 404
++    assert (
++        await client.put(url, json={"title": "Hackeada"}, headers=_auth(other_token))
++    ).status_code == 404
++    assert (await client.delete(url, headers=_auth(other_token))).status_code == 404
++
++    # La tarea del dueño sigue intacta.
++    owner_view = await client.get(url, headers=_auth(owner_token))
++    assert owner_view.status_code == 200
++    assert owner_view.json()["title"] == "Privada"
++
++
++async def test_delete_task(client: AsyncClient, user_payload: dict):
++    token = await _register_and_login(client, user_payload)
++    task = (
++        await client.post("/api/v1/tasks", json={"title": "Temporal"}, headers=_auth(token))
++    ).json()
++
++    response = await client.delete(f"/api/v1/tasks/{task['id']}", headers=_auth(token))
++    assert response.status_code == 204
++
++    body = (await client.get("/api/v1/tasks", headers=_auth(token))).json()
++    assert body["total"] == 0

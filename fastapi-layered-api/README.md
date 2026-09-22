@@ -68,26 +68,34 @@ fastapi-layered-api/
 │   │   ├── base.py                 # Declarative Base de SQLAlchemy
 │   │   └── session.py              # engine async + get_db() con commit-on-success
 │   ├── models/
-│   │   └── user.py                 # Modelo ORM (tabla `users`)
+│   │   ├── user.py                 # Modelo ORM (tabla `users`)
+│   │   └── task.py                 # Modelo ORM (tabla `tasks`) + TaskPriority
 │   ├── schemas/
 │   │   ├── user.py                 # UserCreate / UserUpdate / UserPublic
+│   │   ├── task.py                 # TaskCreate / TaskUpdate / TaskPublic
 │   │   ├── auth.py                 # Token, LoginRequest
 │   │   └── common.py               # ErrorResponse
 │   ├── repositories/
-│   │   └── user_repository.py      # CRUD puro contra la base de datos
+│   │   ├── user_repository.py      # CRUD puro contra la base de datos
+│   │   └── task_repository.py      # CRUD de tareas filtrado por usuario
 │   ├── services/
-│   │   └── user_service.py         # Reglas de negocio + orquestación
+│   │   ├── user_service.py         # Reglas de negocio + orquestación
+│   │   └── task_service.py         # Regla de pertenencia de tareas
 │   └── api/
 │       ├── deps.py                 # Dependencias compartidas (DB, auth)
 │       └── v1/
 │           ├── api.py              # Agregador de routers v1
 │           └── routers/
 │               ├── auth.py         # POST /auth/register, /auth/login
-│               └── users.py        # /users/me, /users, /users/{id}
+│               ├── users.py        # /users/me, /users, /users/{id}
+│               └── tasks.py        # /tasks, /tasks/{id}
 ├── tests/                          # pytest + httpx.AsyncClient
 │   ├── conftest.py
 │   ├── test_auth.py
-│   └── test_users.py
+│   ├── test_users.py
+│   └── test_tasks.py
+├── docs/
+│   └── cambios/                    # Registro de cambios (resumen + diff)
 ├── requirements.txt
 ├── .env.example
 ├── .gitignore
